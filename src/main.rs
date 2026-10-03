@@ -157,13 +157,13 @@ async fn main() -> Result<()> {
     match execution_mode(&args) {
         ExecutionMode::Tui => run_tui(&args).await,
         ExecutionMode::Once => {
-            let collector = build_collector(&args);
+            let mut collector = build_collector(&args);
             let snapshot = collector.collect_snapshot()?;
             println!("{}", snapshot_to_json(&snapshot)?);
             Ok(())
         }
         ExecutionMode::TinyOnce => {
-            let collector = build_collector(&args);
+            let mut collector = build_collector(&args);
             let snapshot = collector.collect_snapshot()?;
             println!("{}", render_tiny_line(&snapshot.system));
             Ok(())
@@ -182,7 +182,7 @@ fn flush_stdout() -> Result<()> {
 /// SIGTERM). A clean interrupt ends with exit 0; a collection failure ends
 /// non-zero with the cause on stderr.
 async fn run_tiny_watch(args: &Args) -> Result<()> {
-    let collector = build_collector(args);
+    let mut collector = build_collector(args);
     let mut ticker = tokio::time::interval(Duration::from_millis(args.interval));
     loop {
         tokio::select! {
@@ -545,12 +545,12 @@ mod tests {
             min_rss: 1_000_000,
             ..args_with(false, true, false)
         };
-        let collector = build_collector(&filtered);
+        let mut collector = build_collector(&filtered);
         let snapshot = collector.collect_snapshot().unwrap();
         assert!(snapshot.processes.is_empty());
 
         let plain = args_with(false, true, false);
-        let collector = build_collector(&plain);
+        let mut collector = build_collector(&plain);
         assert!(collector.collect_snapshot().is_ok());
 
         // --no-smaps disables detailed PSS/USS collection end to end.
@@ -559,7 +559,7 @@ mod tests {
             min_rss: 0,
             ..args_with(false, true, false)
         };
-        let collector = build_collector(&bare);
+        let mut collector = build_collector(&bare);
         let snapshot = collector.collect_snapshot().unwrap();
         assert!(
             snapshot.processes.iter().all(|p| p.pss == 0 && p.uss == 0),

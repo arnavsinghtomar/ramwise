@@ -16,9 +16,10 @@
 //! stdout (used by `--once`-style pipelines); nothing else is created.
 
 use std::fmt::Write as _;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
@@ -70,10 +71,38 @@ pub fn render_csv(snapshot: &ExportSnapshot, include_details: bool) -> Result<St
     )
     .unwrap();
     for (field, value) in [
-        ("total_bytes", system.total_bytes),
-        ("available_bytes", system.available_bytes),
-        ("swap_total_bytes", system.swap_total_bytes),
-        ("swap_used_bytes", system.swap_used_bytes),
+        ("total_bytes", serde_json::to_string(&system.total_bytes)?),
+        (
+            "available_bytes",
+            serde_json::to_string(&system.available_bytes)?,
+        ),
+        ("free_bytes", serde_json::to_string(&system.free_bytes)?),
+        (
+            "buffers_bytes",
+            serde_json::to_string(&system.buffers_bytes)?,
+        ),
+        ("cached_bytes", serde_json::to_string(&system.cached_bytes)?),
+        (
+            "swap_total_bytes",
+            serde_json::to_string(&system.swap_total_bytes)?,
+        ),
+        (
+            "swap_used_bytes",
+            serde_json::to_string(&system.swap_used_bytes)?,
+        ),
+        ("slab_bytes", serde_json::to_string(&system.slab_bytes)?),
+        ("shared_bytes", serde_json::to_string(&system.shared_bytes)?),
+        ("active_bytes", serde_json::to_string(&system.active_bytes)?),
+        (
+            "inactive_bytes",
+            serde_json::to_string(&system.inactive_bytes)?,
+        ),
+        ("dirty_bytes", serde_json::to_string(&system.dirty_bytes)?),
+        (
+            "writeback_bytes",
+            serde_json::to_string(&system.writeback_bytes)?,
+        ),
+        ("mapped_bytes", serde_json::to_string(&system.mapped_bytes)?),
     ] {
         writeln!(out, "# system_{field}={value}").unwrap();
     }
@@ -132,11 +161,9 @@ fn escape_csv(field: &str) -> String {
 /// Write `contents` to `path`, refusing to overwrite unless `force`.
 /// A path of `-` writes to stdout instead of touching the filesystem.
 ///
-/// Overwrite refusal is atomic: without `force` the file is created with
-/// `create_new`, so a pre-existing file (or a symlink planted between a
-/// check and the write) fails instead of being clobbered. With `force`
-/// the file is truncated as requested. Symlinks themselves always resolve
-/// — never point an export at a link you do not trust.
+/// Writes use a same-directory temporary file and a final link/rename, so
+/// readers never observe a partial snapshot. Without `force`, the final link
+/// is created atomically and fails when the destination already exists.
 pub fn write_target(path: &Path, contents: &str, force: bool) -> Result<()> {
     if path.as_os_str() == "-" {
         let mut stdout = io::stdout().lock();
@@ -146,29 +173,51 @@ pub fn write_target(path: &Path, contents: &str, force: bool) -> Result<()> {
         stdout.flush().context("failed to flush stdout")?;
         return Ok(());
     }
-    let mut options = OpenOptions::new();
-    options.write(true);
-    if force {
-        options.create(true).truncate(true);
-    } else {
-        // Atomic: fails when the path already exists, no check-then-act race.
-        options.create_new(true);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .context("export path must name a file")?
+        .to_string_lossy();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let temp_path = parent.join(format!(
+        ".{name}.ramwise-{pid}-{nonce}.tmp",
+        pid = std::process::id()
+    ));
+
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| format!("failed to open temporary export {}", temp_path.display()))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", path.display()))?;
+        if force {
+            fs::rename(&temp_path, path)
+                .with_context(|| format!("failed to replace {}", path.display()))?;
+        } else {
+            match fs::hard_link(&temp_path, path) {
+                Ok(()) => fs::remove_file(&temp_path)
+                    .with_context(|| format!("failed to remove {}", temp_path.display()))?,
+                Err(_error) if path.exists() => {
+                    anyhow::bail!("refusing to overwrite existing file {}", path.display())
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to create {}", path.display()));
+                }
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
     }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        // create_new failed because the file exists: keep the clear refusal
-        // message instead of leaking the OS error.
-        Err(_) if !force && path.exists() => {
-            anyhow::bail!("refusing to overwrite existing file {}", path.display())
-        }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to open {} for writing", path.display()));
-        }
-    };
-    file.write_all(contents.as_bytes())
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
+    result
 }
 
 #[cfg(test)]
@@ -214,6 +263,32 @@ mod tests {
         assert!(lines.any(|line| line.starts_with("# system_total_bytes=")));
         let header = csv.lines().find(|line| !line.starts_with('#')).unwrap();
         assert_eq!(header, CSV_COLUMNS.join(","));
+    }
+
+    #[test]
+    fn csv_includes_all_system_fields() {
+        let csv = render_csv(&snapshot_with_process(), false).unwrap();
+        for field in [
+            "total_bytes",
+            "available_bytes",
+            "free_bytes",
+            "buffers_bytes",
+            "cached_bytes",
+            "swap_total_bytes",
+            "swap_used_bytes",
+            "slab_bytes",
+            "shared_bytes",
+            "active_bytes",
+            "inactive_bytes",
+            "dirty_bytes",
+            "writeback_bytes",
+            "mapped_bytes",
+        ] {
+            assert!(
+                csv.contains(&format!("# system_{field}=")),
+                "missing {field}"
+            );
+        }
     }
 
     #[test]

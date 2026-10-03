@@ -181,11 +181,7 @@ fn run_exports(snapshot: &collector::MemorySnapshot, exports: &RequestedExports)
 /// The payload is compact JSON on stdout; failures are `Err` so the process
 /// exits non-zero with the cause on stderr.
 fn snapshot_to_json(snapshot: &collector::MemorySnapshot) -> Result<String> {
-    let export = snapshot.to_export();
-    export
-        .validate()
-        .map_err(|message| anyhow::anyhow!("{message}"))?;
-    serde_json::to_string(&export).context("Failed to serialize snapshot")
+    collector::render_json(&snapshot.to_export())
 }
 
 /// Render the one-line status summary for `--tiny`.

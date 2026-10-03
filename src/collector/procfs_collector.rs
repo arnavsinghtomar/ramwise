@@ -282,7 +282,9 @@ impl Collector {
                             RegionMemory {
                                 region_type,
                                 path: match path {
-                                    MMapPath::Path(path) => Some(path.to_string_lossy().into_owned()),
+                                    MMapPath::Path(path) => {
+                                        Some(path.to_string_lossy().into_owned())
+                                    }
                                     _ => None,
                                 },
                                 size: region.address.1.saturating_sub(region.address.0),

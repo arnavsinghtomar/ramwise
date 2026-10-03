@@ -14,7 +14,7 @@ mod utils;
 #[cfg(test)]
 mod test_support;
 
-use std::io::{self, stdout};
+use std::io::{self, Write, stdout};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -159,23 +159,41 @@ async fn main() -> Result<()> {
         ExecutionMode::Once => {
             let mut collector = build_collector(&args);
             let snapshot = collector.collect_snapshot()?;
-            println!("{}", snapshot_to_json(&snapshot)?);
+            if !write_stdout_line(&snapshot_to_json(&snapshot)?)? {
+                return Ok(());
+            }
             Ok(())
         }
         ExecutionMode::TinyOnce => {
             let mut collector = build_collector(&args);
             let snapshot = collector.collect_snapshot()?;
-            println!("{}", render_tiny_line(&snapshot.system));
+            if !write_stdout_line(&render_tiny_line(&snapshot.system))? {
+                return Ok(());
+            }
             Ok(())
         }
         ExecutionMode::TinyWatch => run_tiny_watch(&args).await,
     }
 }
 
+/// Write one line to stdout without panicking when a downstream consumer exits.
+/// Broken pipes are reported as a clean termination for CLI pipelines.
+fn write_stdout_line(line: &str) -> Result<bool> {
+    let mut stdout = io::stdout().lock();
+    match writeln!(stdout, "{line}") {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(error) => Err(error).context("Failed to write stdout"),
+    }
+}
+
 /// Flush stdout so piped consumers see each line immediately.
-fn flush_stdout() -> Result<()> {
-    use std::io::Write as _;
-    io::stdout().flush().context("Failed to flush stdout")
+fn flush_stdout() -> Result<bool> {
+    match io::stdout().flush() {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(error) => Err(error).context("Failed to flush stdout"),
+    }
 }
 
 /// Print the tiny line every interval until interrupted (SIGINT or
@@ -188,14 +206,19 @@ async fn run_tiny_watch(args: &Args) -> Result<()> {
         tokio::select! {
             _ = ticker.tick() => {
                 let snapshot = collector.collect_snapshot()?;
-                println!("{}", render_tiny_line(&snapshot.system));
-                flush_stdout()?;
+                if !write_stdout_line(&render_tiny_line(&snapshot.system))? {
+                    return Ok(());
+                }
+                if !flush_stdout()? {
+                    return Ok(());
+                }
             }
             result = tokio::signal::ctrl_c() => {
                 result.context("Failed to listen for interrupt")?;
                 return Ok(());
             }
-            _ = terminate_signal() => {
+            result = terminate_signal() => {
+                result?;
                 return Ok(());
             }
         }
@@ -204,15 +227,15 @@ async fn run_tiny_watch(args: &Args) -> Result<()> {
 
 /// SIGTERM waiter; pending forever off unix (Linux-only binary, but the
 /// gate keeps cross-compilation honest).
-async fn terminate_signal() {
+async fn terminate_signal() -> Result<()> {
     #[cfg(unix)]
-    if let Ok(mut terminate) =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    {
-        terminate.recv().await;
-    }
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("Failed to register SIGTERM handler")?;
+    #[cfg(unix)]
+    terminate.recv().await;
     #[cfg(not(unix))]
     std::future::pending::<()>().await;
+    Ok(())
 }
 
 async fn run_tui(args: &Args) -> Result<()> {

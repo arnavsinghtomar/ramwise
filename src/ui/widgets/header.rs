@@ -135,7 +135,8 @@ impl<'a> Widget for HeaderWidget<'a> {
         for (index, candidate) in candidates.iter().enumerate() {
             let used: usize = spans.iter().map(|span| span.width()).sum();
             let extra: usize = candidate.iter().map(|span| span.width()).sum();
-            if used + extra <= width {
+            let reserve_glyph = !pressure_shown && index != 1;
+            if used + extra + usize::from(reserve_glyph) <= width {
                 spans.extend(candidate.iter().cloned());
                 pressure_shown = pressure_shown || index == 1;
             }

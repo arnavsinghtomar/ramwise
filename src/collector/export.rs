@@ -26,6 +26,8 @@ pub struct CollectorMetadata {
     pub name: String,
     pub version: String,
     pub platform: String,
+    #[serde(default)]
+    pub host: String,
 }
 
 /// System metrics. All memory values are bytes.
@@ -153,6 +155,7 @@ impl ExportSnapshot {
                 name: "ramwise-procfs".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 platform: std::env::consts::OS.into(),
+                host: std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into()),
             },
             capabilities,
             system: (&snapshot.system).into(),
@@ -171,6 +174,7 @@ impl ExportSnapshot {
             name: "ramwise-fixture".into(),
             version: "0.0.0".into(),
             platform: "test".into(),
+            host: "fixture".into(),
         };
         fixture
             .capabilities

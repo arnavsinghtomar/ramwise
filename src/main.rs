@@ -136,7 +136,9 @@ fn build_collector(args: &Args) -> Collector {
         .with_interval(Duration::from_millis(args.interval))
         .with_min_rss(args.min_rss.saturating_mul(1024 * 1024))
         .with_smaps(!args.no_smaps)
-        .with_regions(args.export_details)
+        .with_regions(
+            args.export_details && (args.export_json.is_some() || args.export_csv.is_some()),
+        )
 }
 
 /// File exports requested on the command line. Any export implies a single
@@ -165,8 +167,7 @@ fn requested_exports(args: &Args) -> Option<RequestedExports> {
 
 /// Write every requested export. File confirmations go to stderr so stdout
 /// stays pure data when a `-` target is used.
-fn run_exports(snapshot: &collector::MemorySnapshot, exports: &RequestedExports) -> Result<()> {
-    let export = snapshot.to_export();
+fn run_exports(export: &collector::ExportSnapshot, exports: &RequestedExports) -> Result<()> {
     let json_path = exports
         .json
         .as_ref()
@@ -182,16 +183,22 @@ fn run_exports(snapshot: &collector::MemorySnapshot, exports: &RequestedExports)
     {
         anyhow::bail!("JSON and CSV exports must use different paths");
     }
-    if let Some(path) = &json_path {
-        let text = collector::render_json(&export)?;
-        collector::write_target(path, &text, exports.force)?;
+    let json_text = json_path
+        .as_ref()
+        .map(|_| collector::render_json(export))
+        .transpose()?;
+    let csv_text = csv_path
+        .as_ref()
+        .map(|_| collector::render_csv(export, exports.details))
+        .transpose()?;
+    if let (Some(path), Some(text)) = (&json_path, &json_text) {
+        collector::write_target(path, text, exports.force)?;
         if path.as_os_str() != "-" {
             eprintln!("exported JSON snapshot to {}", path.display());
         }
     }
-    if let Some(path) = &csv_path {
-        let text = collector::render_csv(&export, exports.details)?;
-        collector::write_target(path, &text, exports.force)?;
+    if let (Some(path), Some(text)) = (&csv_path, &csv_text) {
+        collector::write_target(path, text, exports.force)?;
         if path.as_os_str() != "-" {
             eprintln!("exported CSV snapshot to {}", path.display());
         }
@@ -271,14 +278,15 @@ async fn main() -> Result<()> {
     // like --once; --tiny additionally prints the status line.
     let collector = build_collector(&args);
     let snapshot = collector.collect_snapshot()?;
+    let export = snapshot.to_export();
     if let Some(exports) = &exports {
-        run_exports(&snapshot, exports)?;
+        run_exports(&export, exports)?;
     }
     match mode {
         ExecutionMode::Tui => Ok(()),
         ExecutionMode::Once => {
             // Explicit --once always prints; bare --export-* writes files only.
-            println!("{}", snapshot_to_json(&snapshot)?);
+            println!("{}", collector::render_json(&export)?);
             Ok(())
         }
         ExecutionMode::TinyOnce => {

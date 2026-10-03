@@ -74,6 +74,7 @@ pub fn render_csv(snapshot: &ExportSnapshot, include_details: bool) -> Result<St
         ("collector_name", snapshot.collector.name.clone()),
         ("collector_version", snapshot.collector.version.clone()),
         ("collector_platform", snapshot.collector.platform.clone()),
+        ("collector_host", snapshot.collector.host.clone()),
         ("total_processes", snapshot.total_processes.to_string()),
         ("running_processes", snapshot.running_processes.to_string()),
     ] {

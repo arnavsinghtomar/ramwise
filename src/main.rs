@@ -68,8 +68,8 @@ struct Args {
 
     /// Print one compact JSON snapshot to stdout and exit (exit 0 on
     /// success, non-zero when collection fails; diagnostics go to stderr).
-    /// Combines with --tiny: JSON prints first, then the status line.
-    #[arg(long, conflicts_with = "watch")]
+    /// Cannot be combined with --tiny or --watch.
+    #[arg(long, conflicts_with_all = ["tiny", "watch"])]
     once: bool,
 
     /// Print one one-line status summary to stdout and exit.
@@ -165,11 +165,6 @@ async fn main() -> Result<()> {
         ExecutionMode::TinyOnce => {
             let collector = build_collector(&args);
             let snapshot = collector.collect_snapshot()?;
-            // Explicit --once composes: JSON payload first (pipelines read
-            // it with head -1), then the status line.
-            if args.once {
-                println!("{}", snapshot_to_json(&snapshot)?);
-            }
             println!("{}", render_tiny_line(&snapshot.system));
             Ok(())
         }
@@ -519,18 +514,15 @@ mod tests {
             ExecutionMode::TinyOnce
         );
         assert_eq!(
-            execution_mode(&args_with(true, true, false)),
-            ExecutionMode::TinyOnce
-        );
-        assert_eq!(
             execution_mode(&args_with(true, false, true)),
             ExecutionMode::TinyWatch
         );
-        // Clap rejects --once --watch, but the dispatcher stays total:
-        // watch wins deterministically if both ever arrive.
-        let mut both = args_with(true, true, false);
-        both.watch = true;
-        assert_eq!(execution_mode(&both), ExecutionMode::TinyWatch);
+    }
+
+    #[test]
+    fn once_rejects_tiny_combinations() {
+        assert!(Args::try_parse_from(["ramwise", "--once", "--tiny"]).is_err());
+        assert!(Args::try_parse_from(["ramwise", "--once", "--watch"]).is_err());
     }
 
     #[test]

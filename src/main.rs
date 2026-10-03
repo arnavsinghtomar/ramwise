@@ -199,9 +199,14 @@ fn flush_stdout() -> Result<bool> {
 /// Print the tiny line every interval until interrupted (SIGINT or
 /// SIGTERM). A clean interrupt ends with exit 0; a collection failure ends
 /// non-zero with the cause on stderr.
+#[cfg(unix)]
 async fn run_tiny_watch(args: &Args) -> Result<()> {
     let mut collector = build_collector(args);
     let mut ticker = tokio::time::interval(Duration::from_millis(args.interval));
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("Failed to register SIGINT handler")?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("Failed to register SIGTERM handler")?;
     loop {
         tokio::select! {
             _ = ticker.tick() => {
@@ -213,29 +218,39 @@ async fn run_tiny_watch(args: &Args) -> Result<()> {
                     return Ok(());
                 }
             }
-            result = tokio::signal::ctrl_c() => {
-                result.context("Failed to listen for interrupt")?;
+            _ = interrupt.recv() => {
                 return Ok(());
             }
-            result = terminate_signal() => {
-                result?;
+            _ = terminate.recv() => {
                 return Ok(());
             }
         }
     }
 }
 
-/// SIGTERM waiter; pending forever off unix (Linux-only binary, but the
-/// gate keeps cross-compilation honest).
-async fn terminate_signal() -> Result<()> {
-    #[cfg(unix)]
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("Failed to register SIGTERM handler")?;
-    #[cfg(unix)]
-    terminate.recv().await;
-    #[cfg(not(unix))]
-    std::future::pending::<()>().await;
-    Ok(())
+/// Keep watch mode available on platforms without Unix signal streams.
+#[cfg(not(unix))]
+async fn run_tiny_watch(args: &Args) -> Result<()> {
+    let mut collector = build_collector(args);
+    let mut ticker = tokio::time::interval(Duration::from_millis(args.interval));
+    let mut interrupt = tokio::signal::ctrl_c();
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let snapshot = collector.collect_snapshot()?;
+                if !write_stdout_line(&render_tiny_line(&snapshot.system))? {
+                    return Ok(());
+                }
+                if !flush_stdout()? {
+                    return Ok(());
+                }
+            }
+            result = &mut interrupt => {
+                result.context("Failed to listen for interrupt")?;
+                return Ok(());
+            }
+        }
+    }
 }
 
 async fn run_tui(args: &Args) -> Result<()> {

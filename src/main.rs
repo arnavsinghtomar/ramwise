@@ -179,9 +179,35 @@ fn run_exports(export: &collector::ExportSnapshot, exports: &RequestedExports) -
         .map(|path| export_path(path, export.captured_at_unix_ms, exports.timestamped))
         .transpose()?;
     if let (Some(json), Some(csv)) = (&json_path, &csv_path)
-        && json == csv
+        && same_export_target(json, csv)?
     {
         anyhow::bail!("JSON and CSV exports must use different paths");
+    }
+
+    fn same_export_target(left: &std::path::Path, right: &std::path::Path) -> Result<bool> {
+        if left.as_os_str() == "-" || right.as_os_str() == "-" {
+            return Ok(left.as_os_str() == right.as_os_str());
+        }
+        if left.exists() && right.exists() {
+            let left_metadata = std::fs::metadata(left)?;
+            let right_metadata = std::fs::metadata(right)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                return Ok(left_metadata.dev() == right_metadata.dev()
+                    && left_metadata.ino() == right_metadata.ino());
+            }
+            #[cfg(not(unix))]
+            {
+                return Ok(std::fs::canonicalize(left)? == std::fs::canonicalize(right)?);
+            }
+        }
+        let normalize = |path: &std::path::Path| -> Result<std::path::PathBuf> {
+            let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            Ok(std::fs::canonicalize(parent)?
+                .join(path.file_name().context("export path must name a file")?))
+        };
+        Ok(normalize(left)? == normalize(right)?)
     }
     let has_stdout = [&json_path, &csv_path]
         .into_iter()

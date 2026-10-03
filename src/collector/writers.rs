@@ -357,11 +357,6 @@ pub fn write_targets(targets: &[(&Path, &str)], force: bool) -> Result<()> {
                 fs::hard_link(path, &backup).with_context(|| {
                     format!("failed to create exclusive backup for {}", path.display())
                 })?;
-                if let Err(error) = fs::remove_file(path) {
-                    let _ = fs::remove_file(&backup);
-                    return Err(error)
-                        .with_context(|| format!("failed to stage existing {}", path.display()));
-                }
                 backups.push((path.to_path_buf(), backup.clone()));
                 Some(backup)
             } else {

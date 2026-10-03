@@ -101,6 +101,10 @@ struct Args {
     /// column to CSV).
     #[arg(long)]
     export_details: bool,
+
+    /// Insert the capture timestamp before the output file extension.
+    #[arg(long)]
+    export_timestamped: bool,
 }
 
 /// How the process executes. Only [`ExecutionMode::Tui`] may initialize the
@@ -132,6 +136,7 @@ fn build_collector(args: &Args) -> Collector {
         .with_interval(Duration::from_millis(args.interval))
         .with_min_rss(args.min_rss.saturating_mul(1024 * 1024))
         .with_smaps(!args.no_smaps)
+        .with_regions(args.export_details)
 }
 
 /// File exports requested on the command line. Any export implies a single
@@ -142,6 +147,7 @@ struct RequestedExports {
     csv: Option<std::path::PathBuf>,
     force: bool,
     details: bool,
+    timestamped: bool,
 }
 
 fn requested_exports(args: &Args) -> Option<RequestedExports> {
@@ -153,6 +159,7 @@ fn requested_exports(args: &Args) -> Option<RequestedExports> {
         csv: args.export_csv.clone(),
         force: args.force,
         details: args.export_details,
+        timestamped: args.export_timestamped,
     })
 }
 
@@ -160,14 +167,29 @@ fn requested_exports(args: &Args) -> Option<RequestedExports> {
 /// stays pure data when a `-` target is used.
 fn run_exports(snapshot: &collector::MemorySnapshot, exports: &RequestedExports) -> Result<()> {
     let export = snapshot.to_export();
-    if let Some(path) = &exports.json {
+    let json_path = exports
+        .json
+        .as_ref()
+        .map(|path| export_path(path, export.captured_at_unix_ms, exports.timestamped))
+        .transpose()?;
+    let csv_path = exports
+        .csv
+        .as_ref()
+        .map(|path| export_path(path, export.captured_at_unix_ms, exports.timestamped))
+        .transpose()?;
+    if let (Some(json), Some(csv)) = (&json_path, &csv_path)
+        && json == csv
+    {
+        anyhow::bail!("JSON and CSV exports must use different paths");
+    }
+    if let Some(path) = &json_path {
         let text = collector::render_json(&export)?;
         collector::write_target(path, &text, exports.force)?;
         if path.as_os_str() != "-" {
             eprintln!("exported JSON snapshot to {}", path.display());
         }
     }
-    if let Some(path) = &exports.csv {
+    if let Some(path) = &csv_path {
         let text = collector::render_csv(&export, exports.details)?;
         collector::write_target(path, &text, exports.force)?;
         if path.as_os_str() != "-" {
@@ -175,6 +197,27 @@ fn run_exports(snapshot: &collector::MemorySnapshot, exports: &RequestedExports)
         }
     }
     Ok(())
+}
+
+fn export_path(
+    path: &std::path::Path,
+    timestamp: u64,
+    timestamped: bool,
+) -> Result<std::path::PathBuf> {
+    if !timestamped || path.as_os_str() == "-" {
+        return Ok(path.to_path_buf());
+    }
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let stem = path
+        .file_stem()
+        .context("timestamped export path must name a file")?
+        .to_string_lossy();
+    let extension = path.extension().map(|value| value.to_string_lossy());
+    let name = match extension {
+        Some(extension) => format!("{stem}-{timestamp}.{extension}"),
+        None => format!("{stem}-{timestamp}"),
+    };
+    Ok(parent.join(name))
 }
 
 /// Serialize one snapshot to the versioned export contract for `--once`.
@@ -608,6 +651,7 @@ mod tests {
             export_csv: None,
             force: false,
             export_details: false,
+            export_timestamped: false,
         }
     }
 
@@ -715,6 +759,7 @@ mod tests {
                 csv: Some(std::path::PathBuf::from("-")),
                 force: true,
                 details: true,
+                timestamped: false,
             })
         );
     }

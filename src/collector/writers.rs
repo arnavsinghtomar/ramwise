@@ -71,6 +71,18 @@ pub fn render_csv(snapshot: &ExportSnapshot, include_details: bool) -> Result<St
     )
     .unwrap();
     for (field, value) in [
+        ("collector_name", snapshot.collector.name.clone()),
+        ("collector_version", snapshot.collector.version.clone()),
+        ("collector_platform", snapshot.collector.platform.clone()),
+        ("total_processes", snapshot.total_processes.to_string()),
+        ("running_processes", snapshot.running_processes.to_string()),
+    ] {
+        writeln!(out, "# {field}={value}").unwrap();
+    }
+    for (capability, status) in &snapshot.capabilities {
+        writeln!(out, "# capability_{capability}={status:?}").unwrap();
+    }
+    for (field, value) in [
         ("total_bytes", serde_json::to_string(&system.total_bytes)?),
         (
             "available_bytes",

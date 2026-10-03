@@ -163,6 +163,7 @@ impl ExportSnapshot {
     }
 
     /// Deterministic fixture for compatibility and serialization tests.
+    #[cfg(test)]
     pub fn fixture() -> Self {
         let mut fixture = Self::from_runtime(&MemorySnapshot::default());
         fixture.captured_at_unix_ms = 1_700_000_000_000;

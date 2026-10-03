@@ -1,13 +1,13 @@
 //! Procfs-based memory data collector
 
 use anyhow::{Context, Result};
-use procfs::process::all_processes;
+use procfs::process::{MMapPath, all_processes};
 use procfs::{Current, Meminfo};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
-use super::types::{MemorySnapshot, ProcessMemory, SystemMemory};
+use super::types::{MemoryRegion, MemorySnapshot, ProcessMemory, RegionMemory, SystemMemory};
 
 /// Memory data collector that reads from /proc
 pub struct Collector {
@@ -15,6 +15,8 @@ pub struct Collector {
     interval: Duration,
     /// Whether to collect detailed smaps data (slower but more accurate)
     collect_smaps: bool,
+    /// Whether to collect per-mapping details for export.
+    collect_regions: bool,
     /// Minimum RSS to include a process (filter out tiny processes) - in bytes
     min_rss_bytes: u64,
 }
@@ -25,6 +27,7 @@ impl Collector {
         Self {
             interval: Duration::from_secs(1),
             collect_smaps: true,
+            collect_regions: false,
             min_rss_bytes: 1024 * 1024, // 1 MB minimum
         }
     }
@@ -38,6 +41,12 @@ impl Collector {
     /// Set whether to collect smaps data
     pub fn with_smaps(mut self, collect: bool) -> Self {
         self.collect_smaps = collect;
+        self
+    }
+
+    /// Set whether to collect per-mapping details.
+    pub fn with_regions(mut self, collect: bool) -> Self {
+        self.collect_regions = collect;
         self
     }
 
@@ -192,6 +201,45 @@ impl Collector {
                     process.shared = shared_clean + shared_dirty;
                     process.private = private_clean + private_dirty;
                 }
+            }
+            if self.collect_regions
+                && self.collect_smaps
+                && let Ok(smaps) = proc.smaps()
+            {
+                process.regions = Some(
+                    smaps
+                        .0
+                        .into_iter()
+                        .map(|region| {
+                            let path = region.pathname;
+                            let region_type = match &path {
+                                MMapPath::Heap => Some(MemoryRegion::Heap),
+                                MMapPath::Stack | MMapPath::TStack(_) => Some(MemoryRegion::Stack),
+                                MMapPath::Vdso => Some(MemoryRegion::Vdso),
+                                MMapPath::Anonymous => Some(MemoryRegion::Anonymous),
+                                MMapPath::Path(_) => Some(MemoryRegion::MappedFile),
+                                _ => Some(MemoryRegion::Other),
+                            };
+                            let ext = region.extension.map;
+                            RegionMemory {
+                                region_type,
+                                path: match path {
+                                    MMapPath::Path(path) => {
+                                        Some(path.to_string_lossy().into_owned())
+                                    }
+                                    _ => None,
+                                },
+                                size: region.address.1.saturating_sub(region.address.0),
+                                rss: ext.get("Rss").copied().unwrap_or(0),
+                                pss: ext.get("Pss").copied().unwrap_or(0),
+                                shared_clean: ext.get("Shared_Clean").copied().unwrap_or(0),
+                                shared_dirty: ext.get("Shared_Dirty").copied().unwrap_or(0),
+                                private_clean: ext.get("Private_Clean").copied().unwrap_or(0),
+                                private_dirty: ext.get("Private_Dirty").copied().unwrap_or(0),
+                            }
+                        })
+                        .collect(),
+                );
             }
 
             processes.push(process);

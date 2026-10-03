@@ -137,8 +137,8 @@ impl Collector {
         self.prev_vmstat = current;
         match &self.prev_vmstat {
             Some(timed) => (
-                timed.sample.pswpin,
-                timed.sample.pswpout,
+                timed.sample.pswpin.unwrap_or(0),
+                timed.sample.pswpout.unwrap_or(0),
                 rates.map(|rates| rates.in_per_sec),
                 rates.map(|rates| rates.out_per_sec),
             ),

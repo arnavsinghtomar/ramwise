@@ -16,4 +16,4 @@ pub use export::{
 };
 pub use procfs_collector::Collector;
 pub use types::{MemorySnapshot, ProcessMemory, SystemMemory};
-pub use writers::{render_csv, render_json, write_target};
+pub use writers::{render_csv, render_json, write_target, write_targets};

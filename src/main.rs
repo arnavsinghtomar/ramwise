@@ -191,14 +191,43 @@ fn run_exports(export: &collector::ExportSnapshot, exports: &RequestedExports) -
         .as_ref()
         .map(|_| collector::render_csv(export, exports.details))
         .transpose()?;
+    if !exports.force {
+        for path in [&json_path, &csv_path].into_iter().flatten() {
+            if path.as_os_str() != "-" && path.exists() {
+                anyhow::bail!("refusing to overwrite existing file {}", path.display());
+            }
+        }
+    }
+    let file_targets = [
+        json_path
+            .as_ref()
+            .zip(json_text.as_ref())
+            .filter(|(path, _)| path.as_os_str() != "-"),
+        csv_path
+            .as_ref()
+            .zip(csv_text.as_ref())
+            .filter(|(path, _)| path.as_os_str() != "-"),
+    ];
+    let file_targets: Vec<_> = file_targets.into_iter().flatten().collect();
+    collector::write_targets(
+        &file_targets
+            .iter()
+            .map(|(path, text)| (path.as_path(), text.as_str()))
+            .collect::<Vec<_>>(),
+        exports.force,
+    )?;
     if let (Some(path), Some(text)) = (&json_path, &json_text) {
-        collector::write_target(path, text, exports.force)?;
+        if path.as_os_str() == "-" {
+            collector::write_target(path, text, exports.force)?;
+        }
         if path.as_os_str() != "-" {
             eprintln!("exported JSON snapshot to {}", path.display());
         }
     }
     if let (Some(path), Some(text)) = (&csv_path, &csv_text) {
-        collector::write_target(path, text, exports.force)?;
+        if path.as_os_str() == "-" {
+            collector::write_target(path, text, exports.force)?;
+        }
         if path.as_os_str() != "-" {
             eprintln!("exported CSV snapshot to {}", path.display());
         }

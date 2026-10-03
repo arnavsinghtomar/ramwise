@@ -103,7 +103,59 @@ pub fn render_csv(snapshot: &ExportSnapshot, include_details: bool) -> Result<St
             "swap_used_bytes",
             serde_json::to_string(&system.swap_used_bytes)?,
         ),
+        (
+            "swap_in_pages",
+            serde_json::to_string(&system.swap_in_pages)?,
+        ),
+        (
+            "swap_out_pages",
+            serde_json::to_string(&system.swap_out_pages)?,
+        ),
+        (
+            "swap_in_rate_per_sec",
+            serde_json::to_string(&system.swap_in_rate_per_sec)?,
+        ),
+        (
+            "swap_out_rate_per_sec",
+            serde_json::to_string(&system.swap_out_rate_per_sec)?,
+        ),
         ("slab_bytes", serde_json::to_string(&system.slab_bytes)?),
+        (
+            "slab_reclaimable_bytes",
+            serde_json::to_string(&system.slab_reclaimable_bytes)?,
+        ),
+        (
+            "slab_unreclaimable_bytes",
+            serde_json::to_string(&system.slab_unreclaimable_bytes)?,
+        ),
+        (
+            "kernel_stack_bytes",
+            serde_json::to_string(&system.kernel_stack_bytes)?,
+        ),
+        (
+            "pressure_some_avg10",
+            serde_json::to_string(&system.pressure_some_avg10)?,
+        ),
+        (
+            "pressure_some_avg60",
+            serde_json::to_string(&system.pressure_some_avg60)?,
+        ),
+        (
+            "pressure_some_avg300",
+            serde_json::to_string(&system.pressure_some_avg300)?,
+        ),
+        (
+            "pressure_full_avg10",
+            serde_json::to_string(&system.pressure_full_avg10)?,
+        ),
+        (
+            "pressure_full_avg60",
+            serde_json::to_string(&system.pressure_full_avg60)?,
+        ),
+        (
+            "pressure_full_avg300",
+            serde_json::to_string(&system.pressure_full_avg300)?,
+        ),
         ("shared_bytes", serde_json::to_string(&system.shared_bytes)?),
         ("active_bytes", serde_json::to_string(&system.active_bytes)?),
         (
@@ -186,29 +238,9 @@ pub fn write_target(path: &Path, contents: &str, force: bool) -> Result<()> {
         stdout.flush().context("failed to flush stdout")?;
         return Ok(());
     }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .context("export path must name a file")?
-        .to_string_lossy();
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let temp_path = parent.join(format!(
-        ".{name}.ramwise-{pid}-{nonce}.tmp",
-        pid = std::process::id()
-    ));
+    let temp_path = stage_target(path, contents, "ramwise")?;
 
     let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .with_context(|| format!("failed to open temporary export {}", temp_path.display()))?;
-        file.write_all(contents.as_bytes())
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("failed to sync {}", path.display()))?;
         if force {
             fs::rename(&temp_path, path)
                 .with_context(|| format!("failed to replace {}", path.display()))?;
@@ -231,6 +263,162 @@ pub fn write_target(path: &Path, contents: &str, force: bool) -> Result<()> {
         let _ = fs::remove_file(&temp_path);
     }
     result
+}
+
+fn stage_target(path: &Path, contents: &str, suffix: &str) -> Result<std::path::PathBuf> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .context("export path must name a file")?
+        .to_string_lossy();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let temp_path = parent.join(format!(
+        ".{name}.{suffix}-{pid}-{nonce}.tmp",
+        pid = std::process::id()
+    ));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| format!("failed to open temporary export {}", temp_path.display()))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = remove_if_exists(&temp_path);
+    }
+    result?;
+    Ok(temp_path)
+}
+
+fn remove_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Write multiple filesystem targets as one transaction. Temporary files are
+/// fully synced before any destination is changed; a failed commit restores
+/// every destination already touched by this call.
+pub fn write_targets(targets: &[(&Path, &str)], force: bool) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let mut staged: Vec<(std::path::PathBuf, &Path)> = Vec::with_capacity(targets.len());
+    for (path, contents) in targets {
+        let temp_path = match stage_target(path, contents, "ramwise-stage") {
+            Ok(temp_path) => temp_path,
+            Err(error) => {
+                for (staged_path, _) in &staged {
+                    let _ = fs::remove_file(staged_path);
+                }
+                return Err(error);
+            }
+        };
+        if !temp_path.exists() {
+            for (staged_path, _) in &staged {
+                let _ = fs::remove_file(staged_path);
+            }
+            anyhow::bail!("staged export disappeared before commit");
+        }
+        staged.push((temp_path, *path));
+    }
+
+    let mut committed = Vec::with_capacity(staged.len());
+    let mut backups: Vec<(std::path::PathBuf, std::path::PathBuf)> =
+        Vec::with_capacity(staged.len());
+    let commit_result = (|| -> Result<()> {
+        for (temp_path, path) in &staged {
+            let backup = if force && path.exists() {
+                let backup = path.with_file_name(format!(
+                    ".{}.ramwise-backup-{}-{}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    std::process::id(),
+                    backups.len()
+                ));
+                fs::rename(path, &backup)
+                    .with_context(|| format!("failed to stage existing {}", path.display()))?;
+                backups.push((path.to_path_buf(), backup.clone()));
+                Some(backup)
+            } else {
+                None
+            };
+            if force {
+                if let Err(error) = fs::rename(temp_path, path) {
+                    if let Some(backup) = backup {
+                        let _ = fs::rename(backup, path);
+                    }
+                    return Err(error)
+                        .with_context(|| format!("failed to commit {}", path.display()));
+                }
+            } else {
+                fs::hard_link(temp_path, path)
+                    .with_context(|| format!("failed to create {}", path.display()))?;
+            }
+            committed.push((path.to_path_buf(), backup));
+            if !force {
+                fs::remove_file(temp_path)
+                    .with_context(|| format!("failed to remove {}", temp_path.display()))?;
+            }
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = commit_result {
+        let mut rollback_error = None;
+        for (path, backup) in committed.into_iter().rev() {
+            if let Err(rollback) = remove_if_exists(&path) {
+                rollback_error = Some(anyhow::anyhow!(
+                    "failed to remove committed {}: {rollback}",
+                    path.display()
+                ));
+            }
+            if let Some(backup) = backup
+                && let Err(rollback) = fs::rename(&backup, &path)
+            {
+                rollback_error = Some(anyhow::anyhow!(
+                    "failed to restore {}: {rollback}",
+                    path.display()
+                ));
+            }
+        }
+        for (temp_path, _) in &staged {
+            if let Err(rollback) = remove_if_exists(temp_path) {
+                rollback_error = Some(anyhow::anyhow!(
+                    "failed to remove staged export {}: {rollback}",
+                    temp_path.display()
+                ));
+            }
+        }
+        for (_, backup) in backups {
+            if let Err(rollback) = remove_if_exists(&backup) {
+                rollback_error = Some(anyhow::anyhow!(
+                    "failed to remove backup {}: {rollback}",
+                    backup.display()
+                ));
+            }
+        }
+        if let Some(rollback_error) = rollback_error {
+            return Err(error).context(format!(
+                "coordinated export rollback failed: {rollback_error}"
+            ));
+        }
+        return Err(error);
+    }
+    for (_, backup) in backups {
+        fs::remove_file(&backup)
+            .with_context(|| format!("failed to remove backup {}", backup.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -289,7 +477,20 @@ mod tests {
             "cached_bytes",
             "swap_total_bytes",
             "swap_used_bytes",
+            "swap_in_pages",
+            "swap_out_pages",
+            "swap_in_rate_per_sec",
+            "swap_out_rate_per_sec",
             "slab_bytes",
+            "slab_reclaimable_bytes",
+            "slab_unreclaimable_bytes",
+            "kernel_stack_bytes",
+            "pressure_some_avg10",
+            "pressure_some_avg60",
+            "pressure_some_avg300",
+            "pressure_full_avg10",
+            "pressure_full_avg60",
+            "pressure_full_avg300",
             "shared_bytes",
             "active_bytes",
             "inactive_bytes",

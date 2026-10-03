@@ -183,6 +183,17 @@ fn run_exports(export: &collector::ExportSnapshot, exports: &RequestedExports) -
     {
         anyhow::bail!("JSON and CSV exports must use different paths");
     }
+    let has_stdout = [&json_path, &csv_path]
+        .into_iter()
+        .flatten()
+        .any(|path| path.as_os_str() == "-");
+    let has_file = [&json_path, &csv_path]
+        .into_iter()
+        .flatten()
+        .any(|path| path.as_os_str() != "-");
+    if has_stdout && has_file {
+        anyhow::bail!("stdout exports cannot be combined with file exports");
+    }
     let json_text = json_path
         .as_ref()
         .map(|_| collector::render_json(export))
@@ -195,6 +206,15 @@ fn run_exports(export: &collector::ExportSnapshot, exports: &RequestedExports) -
         for path in [&json_path, &csv_path].into_iter().flatten() {
             if path.as_os_str() != "-" && path.exists() {
                 anyhow::bail!("refusing to overwrite existing file {}", path.display());
+            }
+        }
+    } else {
+        for path in [&json_path, &csv_path].into_iter().flatten() {
+            if path.as_os_str() != "-" && path.exists() && !path.is_file() {
+                anyhow::bail!(
+                    "refusing to replace non-file export target {}",
+                    path.display()
+                );
             }
         }
     }

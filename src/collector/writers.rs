@@ -339,14 +339,29 @@ pub fn write_targets(targets: &[(&Path, &str)], force: bool) -> Result<()> {
     let commit_result = (|| -> Result<()> {
         for (temp_path, path) in &staged {
             let backup = if force && path.exists() {
+                if !path.is_file() {
+                    anyhow::bail!(
+                        "refusing to replace non-file export target {}",
+                        path.display()
+                    );
+                }
                 let backup = path.with_file_name(format!(
-                    ".{}.ramwise-backup-{}-{}",
+                    ".{}.ramwise-backup-{}-{}-{}",
                     path.file_name().unwrap().to_string_lossy(),
                     std::process::id(),
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |duration| duration.as_nanos()),
                     backups.len()
                 ));
-                fs::rename(path, &backup)
-                    .with_context(|| format!("failed to stage existing {}", path.display()))?;
+                fs::hard_link(path, &backup).with_context(|| {
+                    format!("failed to create exclusive backup for {}", path.display())
+                })?;
+                if let Err(error) = fs::remove_file(path) {
+                    let _ = fs::remove_file(&backup);
+                    return Err(error)
+                        .with_context(|| format!("failed to stage existing {}", path.display()));
+                }
                 backups.push((path.to_path_buf(), backup.clone()));
                 Some(backup)
             } else {
@@ -355,7 +370,7 @@ pub fn write_targets(targets: &[(&Path, &str)], force: bool) -> Result<()> {
             if force {
                 if let Err(error) = fs::rename(temp_path, path) {
                     if let Some(backup) = backup {
-                        let _ = fs::rename(backup, path);
+                        let _ = restore_backup(path, &backup);
                     }
                     return Err(error)
                         .with_context(|| format!("failed to commit {}", path.display()));
@@ -383,7 +398,7 @@ pub fn write_targets(targets: &[(&Path, &str)], force: bool) -> Result<()> {
                 ));
             }
             if let Some(backup) = backup
-                && let Err(rollback) = fs::rename(&backup, &path)
+                && let Err(rollback) = restore_backup(&path, &backup)
             {
                 rollback_error = Some(anyhow::anyhow!(
                     "failed to restore {}: {rollback}",
@@ -399,19 +414,12 @@ pub fn write_targets(targets: &[(&Path, &str)], force: bool) -> Result<()> {
                 ));
             }
         }
-        for (_, backup) in backups {
-            if let Err(rollback) = remove_if_exists(&backup) {
-                rollback_error = Some(anyhow::anyhow!(
-                    "failed to remove backup {}: {rollback}",
-                    backup.display()
-                ));
-            }
-        }
         if let Some(rollback_error) = rollback_error {
             return Err(error).context(format!(
                 "coordinated export rollback failed: {rollback_error}"
             ));
         }
+
         return Err(error);
     }
     for (_, backup) in backups {
@@ -419,6 +427,11 @@ pub fn write_targets(targets: &[(&Path, &str)], force: bool) -> Result<()> {
             .with_context(|| format!("failed to remove backup {}", backup.display()))?;
     }
     Ok(())
+}
+
+fn restore_backup(path: &Path, backup: &Path) -> io::Result<()> {
+    fs::hard_link(backup, path)?;
+    fs::remove_file(backup)
 }
 
 #[cfg(test)]
